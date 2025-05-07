@@ -5,8 +5,33 @@ const path = require("path");
 
 const app = express();
 const PORT = 3000;
-const IP = "192.168.1.6"; // Tu IP local
 
+
+// Funcion para obtener la ip automaticamnete/////////////
+const os = require("os");
+
+function obtenerIPLocal() {
+  const interfaces = os.networkInterfaces();
+  for (const nombre in interfaces) {
+    for (const iface of interfaces [nombre]) {
+      if (iface.family === "IPv4" && !iface.internal) {
+        return iface.address;
+      }
+    }
+  }
+  return "localhost";
+}
+
+app.get("/api/ip", (req, res) => {
+  res.json({
+    ip: obtenerIPLocal(),
+    puerto: PORT,
+    url: `http://${obtenerIPLocal()}:${PORT}/api/`
+  });
+});
+
+const IP = obtenerIPLocal(); // Tu IP local
+/////////////////////////////////////////////////////////////
 // Middleware
 app.use(cors());
 
@@ -23,18 +48,21 @@ function listarVideosDeCategoria(categoria) {
     return [];
   }
 
-  const archivos = fs.readdirSync(categoriaPath);
-  console.log(`Archivos encontrados en la categoría ${categoria}:`, archivos);
-
-  return archivos
+  return fs.readdirSync(categoriaPath)
     .filter((nombre) => nombre.toLowerCase().endsWith(".mp4"))
-    .map((nombre) => ({
-      titulo: nombre.replace(".mp4", ""),
-      url: `http://${IP}:${PORT}/videos/${encodeURIComponent(
-        categoria
-      )}/${encodeURIComponent(nombre)}`,
-    }));
+    .map((nombre) => {
+      const fullPath = path.join(categoriaPath, nombre);
+      const stats = fs.statSync(fullPath);
+      return {
+        titulo: nombre.replace(".mp4", ""),
+        url: `http://${IP}:${PORT}/videos/${encodeURIComponent(categoria)}/${encodeURIComponent(nombre)}`,
+        thumbnail: `http://${IP}:${PORT}/thumbnails/${encodeURIComponent(categoria)}/${nombre.replace(".mp4", ".jpg")}`,
+        fecha: stats.mtimeMs // o birthtimeMs si prefieres
+      };
+    })
+    .sort((a, b) => b.fecha - a.fecha);
 }
+
 
 // Función para listar categorías disponibles
 function listarCategoriasDisponibles() {
@@ -75,11 +103,16 @@ app.get(["/api/videos", "/api/videos/"], (req, res) => {
   categorias.forEach((cat) => {
     todosLosVideos = todosLosVideos.concat(listarVideosDeCategoria(cat));
   });
+
+  // 🔽 Aquí puedes aplicar un orden adicional general si quieres
+  todosLosVideos.sort((a, b) => b.fecha - a.fecha);
+
   if (todosLosVideos.length === 0) {
     return res.status(404).json({ mensaje: "No se encontraron videos." });
   }
   res.json(todosLosVideos);
 });
+
 
 // Obtener videos de **una** categoría
 app.get("/api/videos/:categoria", (req, res) => {
@@ -119,6 +152,7 @@ const IP = "192.168.1.6"; // Tu IP local
 
 // Middleware
 app.use(cors());
+app.use('/thumbnails', express.static('H:/Videos/thumbnails'));
 app.use(express.json());
 
 // Carpeta raíz de tus videos
