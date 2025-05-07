@@ -2,304 +2,196 @@ const express = require("express");
 const cors = require("cors");
 const fs = require("fs");
 const path = require("path");
+const os = require("os");
+const https = require("https");
+const ffmpeg = require("fluent-ffmpeg");
+const ffmpegPath = require("ffmpeg-static");
+
+ffmpeg.setFfmpegPath(ffmpegPath);
 
 const app = express();
 const PORT = 3000;
+const VIDEOS_DIR = "H:/Videos/categoria";
+const THUMBNAILS_DIR = "H:/Videos/thumbnails";
 
+// Middleware
+app.use(cors());
+app.use('/thumbnails', express.static(THUMBNAILS_DIR));
+app.use(express.json());
 
-// Funcion para obtener la ip automaticamnete/////////////
-const os = require("os");
+// IP manual o automática
+const IP_MANUAL = "10.20.106.75";
+let IP_PUBLICA = IP_MANUAL || "localhost";
 
-function obtenerIPLocal() {
-  const interfaces = os.networkInterfaces();
-  for (const nombre in interfaces) {
-    for (const iface of interfaces [nombre]) {
-      if (iface.family === "IPv4" && !iface.internal) {
-        return iface.address;
+if (!IP_MANUAL) {
+  https.get("https://api.ipify.org?format=json", (res) => {
+    let data = "";
+    res.on("data", (chunk) => data += chunk);
+    res.on("end", () => {
+      try {
+        const ip = JSON.parse(data).ip;
+        IP_PUBLICA = ip;
+        console.log("🌐 IP pública detectada:", IP_PUBLICA);
+      } catch {
+        console.warn("⚠️ No se pudo obtener la IP pública");
       }
-    }
-  }
-  return "localhost";
+    });
+  }).on("error", () => {
+    console.warn("⚠️ Error al consultar la IP pública");
+  });
 }
 
 app.get("/api/ip", (req, res) => {
   res.json({
-    ip: obtenerIPLocal(),
+    ip_publica: IP_PUBLICA,
     puerto: PORT,
-    url: `http://${obtenerIPLocal()}:${PORT}/api/`
+    url_publica: `http://${IP_PUBLICA}:${PORT}/api/`
   });
 });
 
-const IP = obtenerIPLocal(); // Tu IP local
-/////////////////////////////////////////////////////////////
-// Middleware
-app.use(cors());
+function listarCategoriasDisponibles() {
+  if (!fs.existsSync(VIDEOS_DIR)) return [];
+  return fs.readdirSync(VIDEOS_DIR)
+    .filter(nombre => fs.lstatSync(path.join(VIDEOS_DIR, nombre)).isDirectory())
+    .sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()));
+}
 
-// Carpeta raíz de tus videos
-const VIDEOS_DIR = "H:/Videos/categoria";
-
-// Función para listar videos de una subcategoría
 function listarVideosDeCategoria(categoria) {
   const categoriaPath = path.join(VIDEOS_DIR, categoria);
-  console.log(`Buscando en la categoría: ${categoriaPath}`);
+  const thumbCategoriaPath = path.join(THUMBNAILS_DIR, categoria);
 
-  if (!fs.existsSync(categoriaPath)) {
-    console.log(`⚠️ Carpeta no encontrada: ${categoriaPath}`);
-    return [];
+  if (!fs.existsSync(categoriaPath)) return [];
+
+  if (!fs.existsSync(thumbCategoriaPath)) {
+    fs.mkdirSync(thumbCategoriaPath, { recursive: true });
   }
 
-  return fs.readdirSync(categoriaPath)
-    .filter((nombre) => nombre.toLowerCase().endsWith(".mp4"))
-    .map((nombre) => {
-      const fullPath = path.join(categoriaPath, nombre);
-      const stats = fs.statSync(fullPath);
+  // Leer todos los .mp4
+  const archivos = fs.readdirSync(categoriaPath)
+    .filter(nombre => nombre.toLowerCase().endsWith(".mp4"));
+
+  const nombresSinDuplicados = new Set();
+
+  // Filtrar para evitar duplicados: si existe _faststart, ignora el original
+  const videosFinales = archivos.filter(nombre => {
+    const base = nombre.replace("_faststart", "");
+    if (nombresSinDuplicados.has(base)) return false;
+    nombresSinDuplicados.add(base);
+
+    return !nombre.includes("_faststart") || archivos.includes(base + "_faststart.mp4");
+  });
+
+  return videosFinales
+    .map(nombre => {
+      const videoPath = path.join(categoriaPath, nombre);
+      const thumbPath = path.join(thumbCategoriaPath, nombre.replace(".mp4", ".jpg"));
+
+      // Si no existe la miniatura, la genera desde el segundo 10
+      if (!fs.existsSync(thumbPath)) {
+        ffmpeg(videoPath)
+          .on('error', err => console.error(`❌ Error generando thumbnail: ${nombre}`, err.message))
+          .on('end', () => console.log(`✅ Thumbnail generado: ${thumbPath}`))
+          .screenshots({
+            timestamps: ['10'], // segundo 10
+            filename: nombre.replace(".mp4", ".jpg"),
+            folder: thumbCategoriaPath,
+            size: '320x?'
+          });
+      }
+
+      const stats = fs.statSync(videoPath);
       return {
-        titulo: nombre.replace(".mp4", ""),
-        url: `http://${IP}:${PORT}/videos/${encodeURIComponent(categoria)}/${encodeURIComponent(nombre)}`,
-        thumbnail: `http://${IP}:${PORT}/thumbnails/${encodeURIComponent(categoria)}/${nombre.replace(".mp4", ".jpg")}`,
-        fecha: stats.mtimeMs // o birthtimeMs si prefieres
+        titulo: nombre.replace(/_faststart/g, "").replace(".mp4", ""),
+        url: `http://${IP_PUBLICA}:${PORT}/videos/${encodeURIComponent(categoria)}/${encodeURIComponent(nombre)}`,
+        thumbnail: `http://${IP_PUBLICA}:${PORT}/thumbnails/${encodeURIComponent(categoria)}/${encodeURIComponent(nombre.replace(".mp4", ".jpg"))}`,
+        fecha: stats.mtimeMs
       };
     })
     .sort((a, b) => b.fecha - a.fecha);
 }
 
 
-// Función para listar categorías disponibles
-function listarCategoriasDisponibles() {
-  if (!fs.existsSync(VIDEOS_DIR)) {
-    return [];
-  }
-  const carpetas = fs
-    .readdirSync(VIDEOS_DIR)
-    .filter((nombre) =>
-      fs.lstatSync(path.join(VIDEOS_DIR, nombre)).isDirectory()
-    );
+app.get("/", (req, res) => res.send("¡API de Videos funcionando!"));
 
-  // Ordenar alfabéticamente (insensible a mayúsculas)
-  carpetas.sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()));
-
-  return carpetas;
-}
-
-// Ruta principal
-app.get("/", (req, res) => {
-  res.send("¡API de Videos funcionando!");
-});
-
-// Obtener lista de categorías
 app.get("/api/categorias", (req, res) => {
   const categorias = listarCategoriasDisponibles();
-  if (categorias.length === 0) {
-    return res.status(404).json({ mensaje: "No se encontraron categorías." });
-  }
+  if (categorias.length === 0) return res.status(404).json({ mensaje: "No se encontraron categorías." });
   res.json(categorias);
 });
 
-// Obtener **todos** los videos (sin categoría)
 app.get(["/api/videos", "/api/videos/"], (req, res) => {
-  console.log("Recibiendo solicitud para todos los videos");
   const categorias = listarCategoriasDisponibles();
   let todosLosVideos = [];
-  categorias.forEach((cat) => {
+  categorias.forEach(cat => {
     todosLosVideos = todosLosVideos.concat(listarVideosDeCategoria(cat));
   });
-
-  // 🔽 Aquí puedes aplicar un orden adicional general si quieres
-  todosLosVideos.sort((a, b) => b.fecha - a.fecha);
-
-  if (todosLosVideos.length === 0) {
-    return res.status(404).json({ mensaje: "No se encontraron videos." });
-  }
+  if (todosLosVideos.length === 0) return res.status(404).json({ mensaje: "No se encontraron videos." });
   res.json(todosLosVideos);
 });
 
-
-// Obtener videos de **una** categoría
 app.get("/api/videos/:categoria", (req, res) => {
   const categoria = req.params.categoria;
-  console.log(`Recibiendo solicitud para videos de la categoría: ${categoria}`);
   const videos = listarVideosDeCategoria(categoria);
-  if (videos.length === 0) {
-    return res
-      .status(404)
-      .json({ mensaje: "No se encontraron videos para esta categoría." });
-  }
+  if (videos.length === 0) return res.status(404).json({ mensaje: "No se encontraron videos para esta categoría." });
   res.json(videos);
 });
 
-// Servir archivo de video (rango o completo)
 app.get("/videos/:categoria/:nombre", (req, res) => {
   const { categoria, nombre } = req.params;
-  const videoPath = path.join(VIDEOS_DIR, categoria, nombre);
-  if (!fs.existsSync(videoPath)) {
-    return res.status(404).send("Video no encontrado.");
+  const originalPath = path.join(VIDEOS_DIR, categoria, nombre);
+  const isFaststart = nombre.includes("_faststart.mp4");
+  const baseNombre = isFaststart ? nombre : nombre.replace(".mp4", "_faststart.mp4");
+  const videoFinal = path.join(VIDEOS_DIR, categoria, baseNombre);
+
+  if (!fs.existsSync(originalPath)) return res.status(404).send("Video no encontrado.");
+
+  // Si ya tiene faststart, no lo volvemos a optimizar
+  if (!isFaststart && !fs.existsSync(videoFinal)) {
+    console.log(`⚙️ Optimización en curso: ${baseNombre}`);
+    return ffmpeg(originalPath)
+      .outputOptions("-movflags +faststart")
+      .outputOptions("-c copy")
+      .on("end", () => {
+        console.log(`✅ Optimizado: ${videoFinal}`);
+        res.redirect(`/videos/${encodeURIComponent(categoria)}/${encodeURIComponent(baseNombre)}`);
+      })
+      .on("error", err => {
+        console.error(`❌ Error optimizando ${nombre}:`, err.message);
+        res.status(500).send("Error al preparar el video.");
+      })
+      .save(videoFinal);
   }
-  const stat = fs.statSync(videoPath);
+
+  // Reproducir el archivo final
+  const stat = fs.statSync(videoFinal);
   const fileSize = stat.size;
   const range = req.headers.range;
 
+  let start = 0;
+  let end = fileSize - 1;
+
   if (range) {
     const parts = range.replace(/bytes=/, "").split("-");
-    const start = parseInt(parts[0], 10);
-    const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;const express = require("express");
-const cors = require("cors");
-const fs = require("fs");
-const path = require("path");
-
-const app = express();
-const PORT = 3000;
-const IP = "192.168.1.6"; // Tu IP local
-
-// Middleware
-app.use(cors());
-app.use('/thumbnails', express.static('H:/Videos/thumbnails'));
-app.use(express.json());
-
-// Carpeta raíz de tus videos
-const VIDEOS_DIR = "H:/Videos/categoria";
-
-// Función para listar videos de una subcategoría
-function listarVideosDeCategoria(categoria) {
-  const categoriaPath = path.join(VIDEOS_DIR, categoria);
-  console.log(`Buscando en la categoría: ${categoriaPath}`);
-
-  if (!fs.existsSync(categoriaPath)) {
-    console.log(`⚠️ Carpeta no encontrada: ${categoriaPath}`);
-    return [];
+    start = parseInt(parts[0], 10);
+    end = parts[1] ? parseInt(parts[1], 10) : end;
   }
 
-  const archivos = fs.readdirSync(categoriaPath);
-  console.log(`Archivos encontrados en la categoría ${categoria}:`, archivos);
+  const chunksize = end - start + 1;
+  const file = fs.createReadStream(videoFinal, { start, end });
 
-  return archivos
-    .filter((nombre) => nombre.toLowerCase().endsWith(".mp4"))
-    .map((nombre) => ({
-      titulo: nombre.replace(".mp4", ""),
-      url: `http://${IP}:${PORT}/videos/${encodeURIComponent(
-        categoria
-      )}/${encodeURIComponent(nombre)}`,
-    }));
-}
-
-// Función para listar categorías disponibles
-function listarCategoriasDisponibles() {
-  if (!fs.existsSync(VIDEOS_DIR)) {
-    return [];
-  }
-  const carpetas = fs
-    .readdirSync(VIDEOS_DIR)
-    .filter((nombre) =>
-      fs.lstatSync(path.join(VIDEOS_DIR, nombre)).isDirectory()
-    );
-
-  // Ordenar alfabéticamente (insensible a mayúsculas)
-  carpetas.sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()));
-
-  return carpetas;
-}
-
-// Ruta principal
-app.get("/", (req, res) => {
-  res.send("¡API de Videos funcionando!");
-});
-
-// Obtener lista de categorías
-app.get("/api/categorias", (req, res) => {
-  const categorias = listarCategoriasDisponibles();
-  if (categorias.length === 0) {
-    return res.status(404).json({ mensaje: "No se encontraron categorías." });
-  }
-  res.json(categorias);
-});
-
-// Obtener **todos** los videos (sin categoría)
-app.get(["/api/videos", "/api/videos/"], (req, res) => {
-  console.log("Recibiendo solicitud para todos los videos");
-  const categorias = listarCategoriasDisponibles();
-  let todosLosVideos = [];
-  categorias.forEach((cat) => {
-    todosLosVideos = todosLosVideos.concat(listarVideosDeCategoria(cat));
+  res.writeHead(206, {
+    "Content-Range": `bytes ${start}-${end}/${fileSize}`,
+    "Accept-Ranges": "bytes",
+    "Content-Length": chunksize,
+    "Content-Type": "video/mp4"
   });
-  if (todosLosVideos.length === 0) {
-    return res.status(404).json({ mensaje: "No se encontraron videos." });
-  }
-  res.json(todosLosVideos);
+
+  file.pipe(res);
 });
 
-// Obtener videos de **una** categoría
-app.get("/api/videos/:categoria", (req, res) => {
-  const categoria = req.params.categoria;
-  console.log(`Recibiendo solicitud para videos de la categoría: ${categoria}`);
-  const videos = listarVideosDeCategoria(categoria);
-  if (videos.length === 0) {
-    return res
-      .status(404)
-      .json({ mensaje: "No se encontraron videos para esta categoría." });
-  }
-  res.json(videos);
-});
 
-// Servir archivo de video (rango o completo)
-app.get("/videos/:categoria/:nombre", (req, res) => {
-  const { categoria, nombre } = req.params;
-  const videoPath = path.join(VIDEOS_DIR, categoria, nombre);
-  if (!fs.existsSync(videoPath)) {
-    return res.status(404).send("Video no encontrado.");
-  }
-  const stat = fs.statSync(videoPath);
-  const fileSize = stat.size;
-  const range = req.headers.range;
+app.use((req, res) => res.status(404).json({ mensaje: "Recurso no encontrado" }));
 
-  if (range) {
-    const parts = range.replace(/bytes=/, "").split("-");
-    const start = parseInt(parts[0], 10);
-    const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
-    const chunksize = end - start + 1;
-    const file = fs.createReadStream(videoPath, { start, end });
-    res.writeHead(206, {
-      "Content-Range": `bytes ${start}-${end}/${fileSize}`,
-      "Accept-Ranges": "bytes",
-      "Content-Length": chunksize,
-      "Content-Type": "video/mp4",
-    });
-    file.pipe(res);
-  } else {
-    res.writeHead(200, {
-      "Content-Length": fileSize,
-      "Content-Type": "video/mp4",
-    });
-    fs.createReadStream(videoPath).pipe(res);
-  }
-});
-
-// Manejo de errores
-app.use((req, res, next) => {
-  res.status(404).json({ mensaje: "Recurso no encontrado" });
-});
-
-// Iniciar servidor
-app.listen(PORT, () => {
-  console.log(`🚀 Servidor escuchando en http://${IP}:${PORT}`);
-});
-    const chunksize = end - start + 1;
-    const file = fs.createReadStream(videoPath, { start, end });
-    res.writeHead(206, {
-      "Content-Range": `bytes ${start}-${end}/${fileSize}`,
-      "Accept-Ranges": "bytes",
-      "Content-Length": chunksize,
-      "Content-Type": "video/mp4",
-    });
-    file.pipe(res);
-  } else {
-    res.writeHead(200, {
-      "Content-Length": fileSize,
-      "Content-Type": "video/mp4",
-    });
-    fs.createReadStream(videoPath).pipe(res);
-  }
-});
-
-// Iniciar servidor
-app.listen(PORT, () => {
-  console.log(`🚀 Servidor escuchando en http://${IP}:${PORT}`);
+app.listen(PORT, "0.0.0.0", () => {
+  console.log(`🚀 Servidor escuchando en http://${IP_PUBLICA}:${PORT}`);
 });
