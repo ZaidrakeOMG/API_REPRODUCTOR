@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <title>Cambiar Tipo de Usuario</title>
+  <link rel="stylesheet" href="styles.css" />
+  <style>
+    body {
+      margin: 0;
+      font-family: Arial, sans-serif;
+      background-color: #121212;
+      color: white;
+      display: flex;
+    }
+
+    .sidebar {
+      width: 250px;
+      background-color: #1f1f1f;
+      height: 100vh;
+      padding-top: 20px;
+      position: fixed;
+    }
+
+    .sidebar h2 {
+      text-align: center;
+      margin-bottom: 30px;
+    }
+
+    .sidebar h2 a {
+      color: #00e676;
+      text-decoration: none;
+    }
+
+    .sidebar a {
+      display: block;
+      color: white;
+      padding: 15px 30px;
+      text-decoration: none;
+      transition: background 0.2s, color 0.2s;
+    }
+
+    .sidebar a:hover {
+      background-color: #ffffff20;
+      color: #ffffff;
+    }
+
+    .sidebar a.active {
+      background-color: #ffffff30;
+      color: #ffffff;
+    }
+
+    .main-content {
+      margin-left: 250px;
+      padding: 60px 40px;
+      flex: 1;
+      min-height: 100vh;
+    }
+
+    input, select, button {
+      display: block;
+      margin: 12px 0;
+      padding: 10px;
+      border: none;
+      border-radius: 6px;
+      font-size: 1rem;
+      max-width: 400px;
+    }
+
+    button {
+      background-color: #00e676;
+      color: black;
+      cursor: pointer;
+    }
+
+    button:hover {
+      background-color: #00c853;
+    }
+
+    .user-info {
+      margin-top: 20px;
+      padding: 15px;
+      background-color: #1e1e1e;
+      border-radius: 8px;
+      max-width: 500px;
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Menú lateral -->
+  <div class="sidebar">
+    <h2><a href="index.html">Menú</a></h2>
+    <a href="altas.html">🟢 Altas y Bajas</a>
+    <a href="cambiar-contrasena.html">🔐 Cambio de Contraseña</a>
+    <a href="tipos-usuario.html" class="active">👤 Tipos de Usuario</a>
+  </div>
+
+  <!-- Contenido principal -->
+  <div class="main-content">
+    <h1>👤 Cambiar Tipo de Usuario</h1>
+
+    <label for="tel">Buscar por teléfono:</label>
+    <input type="text" id="tel" placeholder="Ej: 8711234567" />
+
+    <button onclick="buscar()">Buscar usuario</button>
+
+    <div id="usuario-data" class="user-info" style="display: none;">
+      <p><strong>Nombre:</strong> <span id="nombre"></span></p>
+      <p><strong>Usuario:</strong> <span id="usuario"></span></p>
+
+      <label>Tipo de usuario:</label>
+      <select id="tipo">
+        <option value="Basico">Básico</option>
+        <option value="Premium">Premium</option>
+        <option value="Dedicado">Dedicado</option>
+      </select>
+
+      <button onclick="actualizarTipo()">Guardar tipo</button>
+    </div>
+  </div>
+
+  <script>
+    let telefonoActual = "";
+
+    function buscar() {
+      const tel = document.getElementById("tel").value.trim();
+      if (!tel) return alert("Escribe un número de teléfono");
+
+      fetch(`/api/usuario/${tel}`)
+        .then(res => res.json())
+        .then(data => {
+          if (!data.success) return alert(data.mensaje);
+
+          const u = data.usuario;
+          telefonoActual = u.telefono;
+          document.getElementById("nombre").textContent = u.nombre + " " + u.apellidos;
+          document.getElementById("usuario").textContent = u.usuario;
+          document.getElementById("tipo").value = u.tipo_usuario;
+          document.getElementById("usuario-data").style.display = "block";
+        })
+        .catch(err => {
+          console.error(err);
+          alert("Error al buscar usuario");
+        });
+    }
+
+    function actualizarTipo() {
+      const nuevoTipo = document.getElementById("tipo").value;
+      if (!telefonoActual) return alert("Primero busca un usuario");
+
+      fetch(`/api/usuario/${telefonoActual}/tipo`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ nuevoTipo })
+      })
+        .then(res => res.json())
+        .then(data => alert(data.mensaje))
+        .catch(err => {
+          console.error(err);
+          alert("Error al actualizar el tipo de usuario");
+        });
+    }
+  </script>
+
+</body>
+</html>

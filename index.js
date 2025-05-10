@@ -1,12 +1,12 @@
 const express = require("express");
+const path = require("path");
 const cors = require("cors");
 const fs = require("fs");
-const path = require("path");
 const os = require("os");
 const https = require("https");
 const ffmpeg = require("fluent-ffmpeg");
 const ffmpegPath = require("ffmpeg-static");
-const mysql = require("mysql2")
+const mysql = require("mysql2");
 const bcrypt = require("bcrypt");
 
 ffmpeg.setFfmpegPath(ffmpegPath);
@@ -16,14 +16,16 @@ const PORT = 3000;
 const VIDEOS_DIR = "H:/Videos/categoria";
 const THUMBNAILS_DIR = "H:/Videos/thumbnails";
 
-// Middleware
-app.use(cors());
-app.use('/thumbnails', express.static(THUMBNAILS_DIR));
-app.use(express.json());
-
-// IP manual o automática
 const IP_MANUAL = "10.20.106.81";
 let IP_PUBLICA = IP_MANUAL || "localhost";
+
+// ✅ SERVIR PÁGINAS ESTÁTICAS (esto va antes que cualquier ruta personalizada)
+app.use(express.static(path.join(__dirname, "public")));
+app.use('/thumbnails', express.static(THUMBNAILS_DIR));
+app.use(cors());
+app.use(express.json());
+
+
 
 // IP dinámica (si no se usa IP_MANUAL)
 if (!IP_MANUAL) {
@@ -333,6 +335,150 @@ app.get("/api/usuarios", (req, res) => {
     });
   });
 });
+
+// Buscar usuario por teléfono
+app.get("/api/usuario/:telefono", (req, res) => {
+  const telefono = req.params.telefono;
+  const sql = "SELECT id, nombre, apellidos, telefono, usuario, estado, tipo_usuario FROM usuarios WHERE telefono = ?";
+  
+  connection.query(sql, [telefono], (err, results) => {
+    if (err) return res.status(500).json({ success: false, mensaje: "Error en la consulta" });
+    if (results.length === 0) return res.status(404).json({ success: false, mensaje: "Usuario no encontrado" });
+
+    res.json({ success: true, usuario: results[0] });
+  });
+});
+
+// Cambiar estado del usuario (Activo/Inactivo)
+app.put("/api/usuario/:telefono", (req, res) => {
+  const telefono = req.params.telefono;
+  const { nuevoEstado } = req.body;
+
+  if (!["Activo", "Inactivo"].includes(nuevoEstado)) {
+    return res.status(400).json({ success: false, mensaje: "Estado inválido" });
+  }
+
+  const sql = "UPDATE usuarios SET estado = ? WHERE telefono = ?";
+  connection.query(sql, [nuevoEstado, telefono], (err, result) => {
+    if (err) return res.status(500).json({ success: false, mensaje: "Error al actualizar" });
+
+    res.json({ success: true, mensaje: "Estado actualizado correctamente" });
+  });
+});
+
+app.put("/api/cambiar-contrasena", (req, res) => {
+  const { usuario, nuevaContrasena } = req.body;
+
+  if (!usuario || !nuevaContrasena) {
+    return res.status(400).json({ success: false, mensaje: "Faltan datos" });
+  }
+
+  bcrypt.hash(nuevaContrasena, 10, (err, hash) => {
+    if (err) {
+      console.error("❌ Error al cifrar nueva contraseña", err);
+      return res.status(500).json({ success: false, mensaje: "Error interno" });
+    }
+
+    const sql = "UPDATE usuarios SET contrasena = ? WHERE usuario = ?";
+    connection.query(sql, [hash, usuario], (err, result) => {
+      if (err) {
+        console.error("❌ Error al actualizar contraseña", err);
+        return res.status(500).json({ success: false, mensaje: "Error al guardar" });
+      }
+
+      res.json({ success: true, mensaje: "Contraseña actualizada con éxito" });
+    });
+  });
+});
+
+app.put("/api/usuario/:telefono/tipo", (req, res) => {
+  const telefono = req.params.telefono;
+  const { nuevoTipo } = req.body;
+  const tiposValidos = ["Basico", "Premium", "Dedicado"];
+
+  if (!tiposValidos.includes(nuevoTipo)) {
+    return res.status(400).json({ success: false, mensaje: "Tipo inválido" });
+  }
+
+  const sql = "UPDATE usuarios SET tipo_usuario = ? WHERE telefono = ?";
+  connection.query(sql, [nuevoTipo, telefono], (err, result) => {
+    if (err) return res.status(500).json({ success: false, mensaje: "Error al actualizar tipo" });
+
+    res.json({ success: true, mensaje: "Tipo de usuario actualizado correctamente" });
+  });
+});
+
+
+
+app.post("/api/login", (req, res) => {
+  const { usuario, contrasena, dispositivo_hash } = req.body;
+
+  connection.query(
+    "SELECT * FROM usuarios WHERE usuario = ? AND estado = 'Activo'",
+    [usuario],
+    (err, results) => {
+      if (err) return res.status(500).json({ success: false, mensaje: "Error en la base de datos" });
+      if (results.length === 0) return res.json({ success: false, mensaje: "Usuario no encontrado o inactivo" });
+
+      const user = results[0];
+
+      bcrypt.compare(contrasena, user.contrasena, (err, match) => {
+        if (!match) return res.json({ success: false, mensaje: "Contraseña incorrecta" });
+
+        // ✅ Verificar cantidad de dispositivos
+        const tipo = user.tipo_usuario;
+        const maxDispositivos = tipo === "Basico" ? 1 : tipo === "Premium" ? 2 : 3;
+
+        // 1. ¿Ya está registrado este dispositivo?
+        const checkQuery = "SELECT * FROM sesiones_dispositivos WHERE id_usuario = ? AND dispositivo_hash = ?";
+        connection.query(checkQuery, [user.id, dispositivo_hash], (err, existing) => {
+          if (err) return res.status(500).json({ success: false, mensaje: "Error al verificar dispositivo" });
+
+          if (existing.length > 0) {
+            // 😎 El dispositivo ya está registrado → login permitido
+            return res.json({
+              success: true,
+              mensaje: "Login exitoso",
+              usuario: user.usuario,
+              tipo_usuario: user.tipo_usuario
+            });
+          }
+
+          // 2. ¿Cuántos dispositivos tiene?
+          const countQuery = "SELECT COUNT(*) AS total FROM sesiones_dispositivos WHERE id_usuario = ?";
+          connection.query(countQuery, [user.id], (err, countResult) => {
+            if (err) return res.status(500).json({ success: false, mensaje: "Error al contar dispositivos" });
+
+            const total = countResult[0].total;
+            if (total >= maxDispositivos) {
+              return res.json({
+                success: false,
+                mensaje: `Límite de dispositivos alcanzado para tipo ${tipo}`
+              });
+            }
+
+            // 3. Registrar nuevo dispositivo
+            const insertQuery = "INSERT INTO sesiones_dispositivos (id_usuario, dispositivo_hash) VALUES (?, ?)";
+            connection.query(insertQuery, [user.id, dispositivo_hash], (err) => {
+              if (err) return res.status(500).json({ success: false, mensaje: "Error al registrar dispositivo" });
+
+              return res.json({
+                success: true,
+                mensaje: "Login exitoso",
+                usuario: user.usuario,
+                tipo_usuario: user.tipo_usuario
+              });
+            });
+          });
+        });
+      });
+    }
+  );
+});
+
+
+
+
 
 // ⚠️ Esta debe ir al final
 app.use((req, res) => res.status(404).json({ mensaje: "Recurso no encontrado" }));
