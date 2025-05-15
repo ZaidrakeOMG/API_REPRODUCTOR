@@ -9,12 +9,15 @@ const ffmpegPath = require("ffmpeg-static");
 const mysql = require("mysql2");
 const bcrypt = require("bcrypt");
 
+
 ffmpeg.setFfmpegPath(ffmpegPath);
 
 const app = express();
 const PORT = 3000;
 const VIDEOS_DIR = "H:/Videos/categoria";
+const MP3_DIR = "H:/Videos/mp3";
 const THUMBNAILS_DIR = "H:/Videos/thumbnails";
+
 
 const jwt = require("jsonwebtoken");
 const config = {
@@ -23,16 +26,15 @@ const config = {
   },
 };
 
-const IP_MANUAL = "192.168.1.12";
+const IP_MANUAL = "10.20.106.94";
 let IP_PUBLICA = IP_MANUAL || "localhost";
 
-// ✅ SERVIR PÁGINAS ESTÁTICAS (esto va antes que cualquier ruta personalizada)
 app.use(express.static(path.join(__dirname, "public")));
 app.use("/thumbnails", express.static(THUMBNAILS_DIR));
+app.use("/mp3-cover", express.static(path.join(__dirname, "public", "mp3-cover")));
 app.use(cors());
 app.use(express.json());
 
-// IP dinámica (si no se usa IP_MANUAL)
 if (!IP_MANUAL) {
   https
     .get("https://api.ipify.org?format=json", (res) => {
@@ -53,7 +55,6 @@ if (!IP_MANUAL) {
     });
 }
 
-// Conexión BD
 let connection;
 
 function handleDisconnect() {
@@ -84,6 +85,64 @@ function handleDisconnect() {
 }
 
 handleDisconnect();
+
+const mm = require('music-metadata'); // asegúrate de tener esta línea arriba
+
+async function listarMP3Recursivo(directorio) {
+  let archivosMP3 = [];
+
+  if (!fs.existsSync(directorio)) return archivosMP3;
+  const archivos = fs.readdirSync(directorio);
+
+  for (const archivo of archivos) {
+    const rutaCompleta = path.join(directorio, archivo);
+    const stats = fs.statSync(rutaCompleta);
+
+    if (stats.isDirectory()) {
+      const subArchivos = await listarMP3Recursivo(rutaCompleta);
+      archivosMP3 = archivosMP3.concat(subArchivos);
+    } else if (stats.isFile() && archivo.toLowerCase().endsWith(".mp3")) {
+      let portadaUrl = null;
+
+      try {
+        const metadata = await mm.parseFile(rutaCompleta);
+        const picture = metadata.common.picture?.[0];
+
+        console.log(`🎧 ${archivo} - Tiene cover:`, !!picture);
+
+        if (picture) {
+          const nombreArchivo = path.relative(MP3_DIR, rutaCompleta).replace(/\\/g, "_") + ".jpg";
+          const rutaCover = path.join(__dirname, "public", "mp3-cover", nombreArchivo);
+
+          fs.mkdirSync(path.dirname(rutaCover), { recursive: true });
+          fs.writeFileSync(rutaCover, picture.data);
+
+          portadaUrl = `http://${IP_PUBLICA}:${PORT}/mp3-cover/${encodeURIComponent(nombreArchivo)}`;
+        }
+      } catch (err) {
+        console.warn("⚠️ No se pudo extraer portada:", archivo, err.message);
+      }
+
+      archivosMP3.push({
+        titulo: path.basename(archivo, ".mp3"),
+        ruta: rutaCompleta,
+        url: `http://${IP_PUBLICA}:${PORT}/mp3/${encodeURIComponent(
+          path.relative(MP3_DIR, rutaCompleta).replace(/\\/g, "/")
+        )}`,
+        fecha: stats.mtimeMs,
+        cover: portadaUrl,
+      });
+    }
+  }
+
+  return archivosMP3;
+}
+
+
+
+
+
+
 
 // Funciones auxiliares
 function listarCategoriasDisponibles() {
@@ -161,6 +220,40 @@ function listarVideosDeCategoria(categoria) {
     })
     .sort((a, b) => b.fecha - a.fecha);
 }
+
+// 🔁 Ruta para listar todos los MP3
+app.get("/api/mp3", async (req, res) => {
+  try {
+    const mp3s = await listarMP3Recursivo(MP3_DIR);
+    if (mp3s.length === 0)
+      return res.status(404).json({ mensaje: "No se encontraron archivos MP3." });
+    res.json(mp3s.sort((a, b) => b.fecha - a.fecha));
+  } catch (err) {
+    console.error("❌ Error en /api/mp3:", err);
+    res.status(500).send("Error interno");
+  }
+});
+
+
+app.get(/^\/mp3\/(.+)$/, (req, res) => {
+  const rutaRelativa = req.params[0]; // captura del grupo de la RegExp
+  const rutaAbsoluta = path.join(MP3_DIR, rutaRelativa);
+
+  if (!fs.existsSync(rutaAbsoluta)) {
+    return res.status(404).send("Archivo MP3 no encontrado.");
+  }
+
+  res.setHeader("Content-Type", "audio/mpeg");
+  fs.createReadStream(rutaAbsoluta)
+    .on("error", (err) => {
+      console.error("❌ Error al reproducir MP3:", err);
+      res.status(500).send("Error interno");
+    })
+    .pipe(res);
+});
+
+
+
 
 // RUTAS API
 
@@ -258,6 +351,8 @@ app.get("/videos/:categoria/:nombre", (req, res) => {
 
   file.pipe(res);
 });
+
+
 
 // --- RUTAS DE AUTENTICACIÓN Y USUARIOS ---
 
